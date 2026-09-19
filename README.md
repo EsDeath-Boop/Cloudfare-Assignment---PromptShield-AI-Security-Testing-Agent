@@ -8,10 +8,6 @@ PromptShield tests LLM system prompts against adversarial attacks, generates dyn
 
 https://promptshield.promptshield.workers.dev/
 
-## GitHub
-
-https://github.com/EsDeath-Boop/Cloudfare-Assignment---PromptShield-AI-Security-Testing-Agent
-
 ## Features
 
 - Quick Scan using a curated baseline attack set
