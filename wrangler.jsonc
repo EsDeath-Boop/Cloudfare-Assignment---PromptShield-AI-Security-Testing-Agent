@@ -3,11 +3,32 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-19",
 
+  "assets": {
+    "directory": "./frontend/dist",
+    "binding": "ASSETS"
+  },
+
   "observability": {
     "enabled": true
   },
 
   "ai": {
     "binding": "AI"
-  }
+  },
+
+  "workflows": [
+    {
+      "binding": "DEEP_SCAN_WORKFLOW",
+      "name": "promptshield-deep-scan",
+      "class_name": "DeepScanWorkflow"
+    }
+  ],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "promptshield-db",
+      "database_id": "18c17326-de07-4726-87e4-99376ac9c9d3"
+    }
+  ]
 }

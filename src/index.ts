@@ -10,6 +10,7 @@
  *
  * Learn more at https://developers.cloudflare.com/workers/
  */
+
 import { attacks } from "./attacks";
 import {
 	calculateSecurityScore,
@@ -20,6 +21,7 @@ import {
 	generateAttackBatch,
 	CATEGORIES,
 } from "./generator";
+import { DeepScanWorkflow } from "./workflow";
 
 interface TestResult {
 	id: string;
@@ -46,11 +48,7 @@ export default {
 		const url = new URL(request.url);
 
 		if (request.method === "GET" && url.pathname === "/") {
-			return Response.json({
-				name: "PromptShield",
-				status: "online",
-				version: "0.1.0",
-			});
+			return env.ASSETS.fetch(request);
 		}
 		if (
 			request.method === "POST" &&
@@ -64,10 +62,18 @@ export default {
 		}
 
 		if (url.pathname === "/api/deep-scan" && request.method === "POST") {
-			return runDeepScan(request, env);
-		
-		}	
-		return new Response("Not Found", { status: 404 });
+			return startDeepScan(request, env);
+		}
+
+		if (url.pathname.startsWith("/api/deep-scan/") && request.method === "GET") {
+			return getDeepScanStatus(url, env);
+		}
+
+		if (request.method === "GET" && url.pathname === "/api/scans") {
+			return getScanHistory(env);
+		}
+
+		return env.ASSETS.fetch(request);
 	},
 } satisfies ExportedHandler<Env>;
 
@@ -141,7 +147,7 @@ async function runSecurityTest(
 	}
 }
 
-async function runDeepScan(
+async function startDeepScan(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
@@ -161,75 +167,142 @@ async function runDeepScan(
 		}
 
 		const attacksPerCategory = Math.min(
-			Math.max(body.attacksPerCategory ?? 5, 1),
+			Math.max(body.attacksPerCategory ?? 1, 1),
 			20,
 		);
 
-		// Step 1: Generate attacks across all categories
-		const generatedAttacks = [];
-
-		for (const category of CATEGORIES) {
-			const categoryAttacks = await generateAttackBatch(
-				env,
-				category,
+		const instance = await env.DEEP_SCAN_WORKFLOW.create({
+			params: {
+				systemPrompt: body.systemPrompt,
 				attacksPerCategory,
-			);
-
-			generatedAttacks.push(...categoryAttacks);
-		}
-
-		// Step 2: Execute every generated attack
-		const results: GeneratedTestResult[] = [];
-
-		for (const attack of generatedAttacks) {
-			const result = await env.AI.run(
-				"@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-				{
-					messages: [
-						{
-							role: "system",
-							content: body.systemPrompt,
-						},
-						{
-							role: "user",
-							content: attack.prompt,
-						},
-					],
-				},
-			);
-
-			const responseText = extractResponse(result);
-
-			const evaluation = await evaluateResponse(
-				env,
-				attack.prompt,
-				responseText,
-			);
-
-			results.push({
-				id: attack.id,
-				name: `Generated ${attack.category} attack`,
-				category: attack.category,
-				severity: getSeverity(attack.category),
-				attackPrompt: attack.prompt,
-				response: responseText,
-				evaluation: evaluation.classification,
-				evaluationReason: evaluation.reason,
-				vulnerable: evaluation.classification === "VULNERABLE",
-			});
-		}
-
-		// Step 3: Calculate security score
-		const scoring = calculateSecurityScore(results);
+			},
+		});
 
 		return Response.json({
 			success: true,
 			mode: "deep",
-			categories: CATEGORIES.length,
-			attacksPerCategory,
-			totalAttacks: generatedAttacks.length,
-			...scoring,
-			results,
+			status: "started",
+			scanId: instance.id,
+			message: "Deep Scan workflow started.",
+		});
+	} catch (error) {
+		return Response.json(
+			{
+				error:
+					error instanceof Error
+						? error.message
+						: "Unknown error",
+			},
+			{ status: 500 },
+		);
+	}
+}
+
+async function getDeepScanStatus(
+	url: URL,
+	env: Env,
+): Promise<Response> {
+	try {
+		const scanId = url.pathname.split("/").pop();
+
+		if (!scanId) {
+			return Response.json(
+				{ error: "scanId is required" },
+				{ status: 400 },
+			);
+		}
+
+		const result = await env.DB.prepare(
+			`SELECT
+				id,
+				status,
+				score,
+				grade,
+				vulnerable_tests,
+				total_tests,
+				result_json,
+				error,
+				created_at,
+				completed_at
+			FROM scans
+			WHERE id = ?`,
+		)
+			.bind(scanId)
+			.first<{
+				id: string;
+				status: string;
+				score: number | null;
+				grade: string | null;
+				vulnerable_tests: number | null;
+				total_tests: number | null;
+				result_json: string | null;
+				error: string | null;
+				created_at: string;
+				completed_at: string | null;
+			}>();
+
+		if (!result) {
+			return Response.json(
+				{ error: "Scan not found" },
+				{ status: 404 },
+			);
+		}
+
+		let report = null;
+
+		if (result.result_json) {
+			try {
+				report = JSON.parse(result.result_json);
+			} catch {
+				report = null;
+			}
+		}
+
+		return Response.json({
+			success: true,
+			scanId: result.id,
+			status: result.status,
+			score: result.score,
+			grade: result.grade,
+			vulnerableTests: result.vulnerable_tests,
+			totalTests: result.total_tests,
+			report,
+			error: result.error,
+			createdAt: result.created_at,
+			completedAt: result.completed_at,
+		});
+	} catch (error) {
+		return Response.json(
+			{
+				error:
+					error instanceof Error
+						? error.message
+						: "Unknown error",
+			},
+			{ status: 500 },
+		);
+	}
+}
+
+async function getScanHistory(env: Env): Promise<Response> {
+	try {
+		const result = await env.DB.prepare(
+			`SELECT
+				id,
+				status,
+				score,
+				grade,
+				vulnerable_tests,
+				total_tests,
+				created_at,
+				completed_at
+			FROM scans
+			ORDER BY created_at DESC`,
+		).all();
+
+		return Response.json({
+			success: true,
+			scans: result.results,
 		});
 	} catch (error) {
 		return Response.json(
@@ -470,3 +543,5 @@ async function generateAttacks(
 		);
 	}
 }
+
+export { DeepScanWorkflow };
